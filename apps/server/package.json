@@ -1,0 +1,16 @@
+{
+  "name": "@angband-town-online/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "echo server build not configured yet",
+    "dev": "node --watch src/index.js",
+    "lint": "echo server lint not configured yet",
+    "test": "echo server tests not configured yet",
+    "typecheck": "echo server typecheck not configured yet"
+  },
+  "dependencies": {
+    "ws": "^8.18.1"
+  }
+}

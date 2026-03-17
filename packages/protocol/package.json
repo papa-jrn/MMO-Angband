@@ -1,0 +1,15 @@
+{
+  "name": "@angband-town-online/protocol",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "build": "echo protocol build not configured yet",
+    "lint": "echo protocol lint not configured yet",
+    "test": "echo protocol tests not configured yet",
+    "typecheck": "echo protocol typecheck not configured yet"
+  }
+}

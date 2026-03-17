@@ -1,0 +1,20 @@
+{
+  "name": "@angband-town-online/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "set ASTRO_TELEMETRY_DISABLED=1&& astro build",
+    "dev": "set ASTRO_TELEMETRY_DISABLED=1&& astro dev",
+    "lint": "echo web lint not configured yet",
+    "test": "echo web tests not configured yet",
+    "typecheck": "set ASTRO_TELEMETRY_DISABLED=1&& astro check"
+  },
+  "dependencies": {
+    "astro": "^5.5.2"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.8",
+    "typescript": "^5.9.3"
+  }
+}

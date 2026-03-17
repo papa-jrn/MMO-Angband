@@ -1,0 +1,15 @@
+{
+  "name": "@angband-town-online/game-core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "build": "echo game-core build not configured yet",
+    "lint": "echo game-core lint not configured yet",
+    "test": "echo game-core tests not configured yet",
+    "typecheck": "echo game-core typecheck not configured yet"
+  }
+}
