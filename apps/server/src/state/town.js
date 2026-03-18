@@ -46,6 +46,18 @@ export function movePlayer(town, playerId, direction) {
   return player;
 }
 
+export function syncTownPlayerStats(town, playerId, character) {
+  const player = town.players[playerId];
+  if (!player || !character) {
+    return null;
+  }
+
+  player.hp = character.hp ?? player.hp;
+  player.maxHp = character.maxHp ?? player.maxHp;
+  player.level = character.level ?? player.level;
+  return player;
+}
+
 export function serializeTown(town) {
   return {
     id: town.id,

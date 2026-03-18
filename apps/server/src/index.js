@@ -3,20 +3,32 @@ import { URL } from "node:url";
 import { WebSocketServer } from "ws";
 import { ALL_DIRECTIONS, CHAT_CHANNELS, DIRECTIONS, MESSAGE_TYPES } from "@angband-town-online/protocol";
 import { createChatMessage } from "./chat/chat-service.js";
+import { buildCharacterTemplate, getCharacterCreationOptions } from "./game/angband-character-data.js";
 import { sendJson, readJsonBody } from "./http/json.js";
 import { createDatabase } from "./storage/database.js";
 import {
+  advanceMonsters,
+  castSpell,
   createInstanceRuntime,
   createNextFloorRuntime,
+  equipItem,
   getInstanceTile,
   moveInstancePlayer,
+  performMeleeAttack,
+  performRangedAttack,
+  pickupItem,
+  restPlayer,
   serializeInstance
+  ,
+  syncRuntimePlayer,
+  unequipItem
 } from "./state/instance-runtime.js";
 import {
   createTownState,
   movePlayer,
   removePlayer,
   serializeTown,
+  syncTownPlayerStats,
   upsertPlayer
 } from "./state/town.js";
 
@@ -91,6 +103,10 @@ async function handleHttpRequest(request, response) {
     });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/character-options") {
+    return sendJson(response, 200, getCharacterCreationOptions());
+  }
+
   if (request.method === "POST" && url.pathname === "/api/account") {
     try {
       const body = await readJsonBody(request);
@@ -122,7 +138,13 @@ async function handleHttpRequest(request, response) {
     }
 
     try {
-      const character = db.createCharacter(account.id, body.characterName, {
+      const template = buildCharacterTemplate({
+        characterName: body.characterName,
+        raceId: body.raceId,
+        classId: body.classId,
+        purchasedStats: body.purchasedStats
+      });
+      const character = db.createCharacter(account.id, template, {
         x: randomInt(0, town.width - 1),
         y: randomInt(0, town.height - 1)
       });
@@ -222,12 +244,44 @@ function handleMessage(socket, message) {
     return handleMove(socket, session, message);
   }
 
+  if (message.type === MESSAGE_TYPES.TOWN_REST) {
+    return handleTownRest(socket, session, message);
+  }
+
   if (message.type === MESSAGE_TYPES.CHAT_SEND) {
     return handleChat(socket, session, message);
   }
 
   if (message.type === MESSAGE_TYPES.INSTANCE_CREATE) {
     return handleInstanceCreate(socket, session, message);
+  }
+
+  if (message.type === MESSAGE_TYPES.INSTANCE_PICKUP) {
+    return handleInstancePickup(socket, session);
+  }
+
+  if (message.type === MESSAGE_TYPES.INSTANCE_ATTACK) {
+    return handleInstanceAttack(socket, session);
+  }
+
+  if (message.type === MESSAGE_TYPES.INSTANCE_RANGED_ATTACK) {
+    return handleInstanceRangedAttack(socket, session);
+  }
+
+  if (message.type === MESSAGE_TYPES.INSTANCE_CAST_SPELL) {
+    return handleInstanceCastSpell(socket, session, message);
+  }
+
+  if (message.type === MESSAGE_TYPES.INSTANCE_REST) {
+    return handleInstanceRest(socket, session, message);
+  }
+
+  if (message.type === MESSAGE_TYPES.CHARACTER_EQUIP) {
+    return handleEquip(socket, session, message);
+  }
+
+  if (message.type === MESSAGE_TYPES.CHARACTER_UNEQUIP) {
+    return handleUnequip(socket, session, message);
   }
 
   if (message.type === MESSAGE_TYPES.INSTANCE_RETURN) {
@@ -350,11 +404,17 @@ function handleMove(socket, session, message) {
 
   if (session.currentMapId === "town_1") {
     const player = movePlayer(town, session.player.id, message.direction);
-    db.updateCharacterPosition(session.characterId, player.x, player.y);
+    let updatedCharacter = db.updateCharacterPosition(session.characterId, player.x, player.y);
+    updatedCharacter = applyTownRecovery(session, updatedCharacter, 1);
+    syncTownPlayerStats(town, session.player.id, updatedCharacter);
 
     broadcast({
       type: MESSAGE_TYPES.TOWN_STATE,
       town: serializeTown(town)
+    });
+    send(socket, {
+      type: MESSAGE_TYPES.CHARACTER_UPDATED,
+      character: updatedCharacter
     });
     return;
   }
@@ -370,17 +430,50 @@ function handleMove(socket, session, message) {
     return;
   }
 
-  const movedPlayer = moveInstancePlayer(runtime, session.characterId, message.direction);
-  db.updateCharacterPosition(session.characterId, movedPlayer.x, movedPlayer.y);
-  const payload = serializeInstance(instance, runtime);
+  const result = moveInstancePlayer(runtime, session.characterId, message.direction);
 
-  for (const [clientSocket, clientSession] of sessions.entries()) {
-    if (clientSession.currentMapId !== instance.id) continue;
-    send(clientSocket, {
-      type: MESSAGE_TYPES.INSTANCE_READY,
-      instance: payload
-    });
+  if (!result.acted) {
+    return broadcastInstance(instance.id, serializeInstance(instance, runtime));
   }
+
+  if (result.moved) {
+    const updatedCharacter = db.updateCharacterPosition(session.characterId, result.player.x, result.player.y);
+    syncRuntimePlayer(runtime, updatedCharacter);
+  }
+
+  advanceMonsters(runtime);
+  persistAllRuntimePlayers(runtime);
+  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+}
+
+function handleTownRest(socket, session, message) {
+  if (session.currentMapId !== "town_1") {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: "No active dungeon run found."
+    });
+    return;
+  }
+
+  const turns = Math.max(1, Math.min(Number(message.turns || 10), 25));
+  const character = db.getCharacterById(session.characterId);
+  const updatedCharacter = applyTownRecovery(session, character, turns);
+
+  send(socket, {
+    type: MESSAGE_TYPES.CHARACTER_UPDATED,
+    character: updatedCharacter
+  });
+  broadcast({
+    type: MESSAGE_TYPES.TOWN_STATE,
+    town: serializeTown(town)
+  });
+  send(socket, {
+    type: MESSAGE_TYPES.CHAT_MESSAGE,
+    channel: CHAT_CHANNELS.TOWN,
+    fromPlayerId: "system",
+    fromName: "System",
+    text: `${updatedCharacter.name} rests safely in town for ${turns} turns.`
+  });
 }
 
 function handleChat(socket, session, message) {
@@ -492,6 +585,134 @@ function handleInstanceCreate(socket, session, message) {
     type: MESSAGE_TYPES.TOWN_STATE,
     town: serializeTown(town)
   });
+}
+
+function handleInstancePickup(socket, session) {
+  const instance = db.getActiveInstanceByCharacter(session.characterId);
+  const runtime = instance ? ensureInstanceRuntime(instance) : null;
+  if (!instance || !runtime) {
+    return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
+  }
+
+  pickupItem(runtime, session.characterId);
+  persistRuntimePlayer(session.characterId, runtime);
+  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+}
+
+function handleInstanceAttack(socket, session) {
+  const instance = db.getActiveInstanceByCharacter(session.characterId);
+  const runtime = instance ? ensureInstanceRuntime(instance) : null;
+  if (!instance || !runtime) {
+    return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
+  }
+
+  performMeleeAttack(runtime, session.characterId);
+  advanceMonsters(runtime);
+  persistAllRuntimePlayers(runtime);
+  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+}
+
+function handleInstanceRangedAttack(socket, session) {
+  const instance = db.getActiveInstanceByCharacter(session.characterId);
+  const runtime = instance ? ensureInstanceRuntime(instance) : null;
+  if (!instance || !runtime) {
+    return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
+  }
+
+  performRangedAttack(runtime, session.characterId);
+  advanceMonsters(runtime);
+  persistAllRuntimePlayers(runtime);
+  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+}
+
+function handleInstanceCastSpell(socket, session, message) {
+  const instance = db.getActiveInstanceByCharacter(session.characterId);
+  const runtime = instance ? ensureInstanceRuntime(instance) : null;
+  if (!instance || !runtime) {
+    return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
+  }
+
+  try {
+    castSpell(runtime, session.characterId, message.spellId);
+    advanceMonsters(runtime);
+    persistAllRuntimePlayers(runtime);
+    broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to cast spell."
+    });
+  }
+}
+
+function handleInstanceRest(socket, session, message) {
+  const instance = db.getActiveInstanceByCharacter(session.characterId);
+  const runtime = instance ? ensureInstanceRuntime(instance) : null;
+  if (!instance || !runtime) {
+    return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
+  }
+
+  restPlayer(runtime, session.characterId, message.turns);
+  persistAllRuntimePlayers(runtime);
+  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+}
+
+function handleEquip(socket, session, message) {
+  const character = db.getCharacterById(session.characterId);
+  if (!character) {
+    return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "Character not found." });
+  }
+
+  try {
+    const source = session.currentMapId === "town_1"
+      ? createCharacterStateProxy(character)
+      : ensureInstanceRuntime(db.getActiveInstanceByCharacter(session.characterId));
+    const runtimePlayerContext = source.players ? source : { players: { [session.characterId]: character }, log: [] };
+    equipItem(runtimePlayerContext, session.characterId, message.itemId);
+    const updatedCharacter = db.updateCharacterState(session.characterId, {
+      inventory: runtimePlayerContext.players[session.characterId].inventory,
+      equipmentSlots: runtimePlayerContext.players[session.characterId].equipmentSlots
+    });
+    if (source.players) {
+      syncRuntimePlayer(source, updatedCharacter);
+      broadcastInstance(session.currentMapId, serializeInstance(db.getActiveInstanceByCharacter(session.characterId), source));
+    }
+    send(socket, { type: MESSAGE_TYPES.CHARACTER_UPDATED, character: updatedCharacter });
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to equip item."
+    });
+  }
+}
+
+function handleUnequip(socket, session, message) {
+  const character = db.getCharacterById(session.characterId);
+  if (!character) {
+    return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "Character not found." });
+  }
+
+  try {
+    const source = session.currentMapId === "town_1"
+      ? createCharacterStateProxy(character)
+      : ensureInstanceRuntime(db.getActiveInstanceByCharacter(session.characterId));
+    const runtimePlayerContext = source.players ? source : { players: { [session.characterId]: character }, log: [] };
+    unequipItem(runtimePlayerContext, session.characterId, message.slot);
+    const updatedCharacter = db.updateCharacterState(session.characterId, {
+      inventory: runtimePlayerContext.players[session.characterId].inventory,
+      equipmentSlots: runtimePlayerContext.players[session.characterId].equipmentSlots
+    });
+    if (source.players) {
+      syncRuntimePlayer(source, updatedCharacter);
+      broadcastInstance(session.currentMapId, serializeInstance(db.getActiveInstanceByCharacter(session.characterId), source));
+    }
+    send(socket, { type: MESSAGE_TYPES.CHARACTER_UPDATED, character: updatedCharacter });
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to unequip item."
+    });
+  }
 }
 
 function handleInstanceReturn(socket, session) {
@@ -614,6 +835,7 @@ function handleUseStairs(socket, session, message) {
   for (const [clientSocket, clientSession] of sessions.entries()) {
     if (clientSession.currentMapId !== instance.id) continue;
     db.updateCharacterPosition(clientSession.characterId, nextRuntime.players[clientSession.characterId].x, nextRuntime.players[clientSession.characterId].y);
+    persistRuntimePlayer(clientSession.characterId, nextRuntime);
     send(clientSocket, {
       type: MESSAGE_TYPES.INSTANCE_READY,
       instance: payload
@@ -635,6 +857,73 @@ function ensureInstanceRuntime(instance) {
   }
 
   return instanceRuntimes.get(instance.id);
+}
+
+function persistRuntimePlayer(characterId, runtime) {
+  const player = runtime.players[characterId];
+  if (!player) return null;
+
+  return db.updateCharacterState(characterId, {
+    hp: player.hp,
+    maxHp: player.maxHp,
+    mana: player.mana,
+    maxMana: player.maxMana,
+    experiencePoints: player.experiencePoints,
+    inventory: player.inventory,
+    equipmentSlots: player.equipmentSlots
+  });
+}
+
+function applyTownRecovery(session, character, turns) {
+  if (!character) {
+    return null;
+  }
+
+  const hpGain = Math.max(1, Number(turns || 1));
+  const manaGain = Math.max(1, Number(turns || 1));
+  const updatedCharacter = db.updateCharacterState(session.characterId, {
+    hp: Math.min(character.maxHp, character.hp + hpGain),
+    maxHp: character.maxHp,
+    mana: Math.min(character.maxMana ?? 0, (character.mana ?? 0) + manaGain),
+    maxMana: character.maxMana ?? 0
+  });
+
+  session.player.hp = updatedCharacter.hp;
+  session.player.maxHp = updatedCharacter.maxHp;
+  syncTownPlayerStats(town, session.player.id, updatedCharacter);
+  return updatedCharacter;
+}
+
+function persistAllRuntimePlayers(runtime) {
+  for (const characterId of Object.keys(runtime.players)) {
+    const updatedCharacter = persistRuntimePlayer(characterId, runtime);
+    if (updatedCharacter) {
+      syncRuntimePlayer(runtime, updatedCharacter);
+    }
+  }
+}
+
+function broadcastInstance(instanceId, payload) {
+  for (const [clientSocket, clientSession] of sessions.entries()) {
+    if (clientSession.currentMapId !== instanceId) continue;
+    send(clientSocket, {
+      type: MESSAGE_TYPES.INSTANCE_READY,
+      instance: payload
+    });
+    send(clientSocket, {
+      type: MESSAGE_TYPES.CHARACTER_UPDATED,
+      character: db.getCharacterById(clientSession.characterId)
+    });
+  }
+}
+
+function createCharacterStateProxy(character) {
+  return {
+    players: {
+      [character.id]: structuredClone(character)
+    },
+    log: []
+  };
 }
 
 function authenticateCharacter(accountId, characterId, sessionToken) {

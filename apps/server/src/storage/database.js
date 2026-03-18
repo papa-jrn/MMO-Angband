@@ -1,8 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
+import { getAvailableSpellsForClass, getStartingManaForClass } from "../game/angband-character-data.js";
 
-const dbPath = resolve(process.cwd(), "apps/server/data/game.sqlite");
+const currentDirectory = dirname(fileURLToPath(import.meta.url));
+const dbPath = resolve(currentDirectory, "../../data/game.sqlite");
 
 export function createDatabase() {
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -22,9 +25,27 @@ export function createDatabase() {
       id TEXT PRIMARY KEY,
       account_id TEXT NOT NULL,
       name TEXT NOT NULL UNIQUE,
+      race_id TEXT NOT NULL DEFAULT '',
+      race_name TEXT NOT NULL DEFAULT '',
+      class_id TEXT NOT NULL DEFAULT '',
+      class_name TEXT NOT NULL DEFAULT '',
       level INTEGER NOT NULL,
+      experience_points INTEGER NOT NULL DEFAULT 0,
+      experience_factor INTEGER NOT NULL DEFAULT 100,
+      point_buy_spent INTEGER NOT NULL DEFAULT 0,
       hp INTEGER NOT NULL,
       max_hp INTEGER NOT NULL,
+      purchased_stats TEXT NOT NULL DEFAULT '{}',
+      race_stats TEXT NOT NULL DEFAULT '{}',
+      class_stats TEXT NOT NULL DEFAULT '{}',
+      final_stats TEXT NOT NULL DEFAULT '{}',
+      skills TEXT NOT NULL DEFAULT '{}',
+      equipment TEXT NOT NULL DEFAULT '[]',
+      inventory TEXT NOT NULL DEFAULT '[]',
+      equipment_slots TEXT NOT NULL DEFAULT '{}',
+      known_spells TEXT NOT NULL DEFAULT '[]',
+      mana INTEGER NOT NULL DEFAULT 0,
+      max_mana INTEGER NOT NULL DEFAULT 0,
       map_id TEXT NOT NULL,
       x INTEGER NOT NULL,
       y INTEGER NOT NULL,
@@ -83,6 +104,25 @@ export function createDatabase() {
     );
   `);
 
+  ensureColumn(db, "characters", "race_id", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "characters", "race_name", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "characters", "class_id", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "characters", "class_name", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "characters", "experience_points", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "characters", "experience_factor", "INTEGER NOT NULL DEFAULT 100");
+  ensureColumn(db, "characters", "point_buy_spent", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "characters", "purchased_stats", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "characters", "race_stats", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "characters", "class_stats", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "characters", "final_stats", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "characters", "skills", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "characters", "equipment", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "characters", "inventory", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "characters", "equipment_slots", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(db, "characters", "known_spells", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "characters", "mana", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "characters", "max_mana", "INTEGER NOT NULL DEFAULT 0");
+
   const statements = createStatements(db);
 
   return {
@@ -111,11 +151,11 @@ export function createDatabase() {
     },
 
     listCharactersForAccount(accountId) {
-      return statements.selectCharactersByAccount.all(accountId);
+      return statements.selectCharactersByAccount.all(accountId).map(deserializeCharacterRow);
     },
 
-    createCharacter(accountId, characterName, initialPosition) {
-      const name = normalizeName(characterName, 24);
+    createCharacter(accountId, template, initialPosition) {
+      const name = normalizeName(template.name, 24);
       const now = nowIso();
 
       if (statements.selectCharacterByName.get(name)) {
@@ -126,9 +166,27 @@ export function createDatabase() {
         id: createId("char", name),
         accountId,
         name,
-        level: 1,
-        hp: 20,
-        maxHp: 20,
+        raceId: template.raceId,
+        raceName: template.raceName,
+        classId: template.classId,
+        className: template.className,
+        level: template.level,
+        experiencePoints: template.experiencePoints,
+        experienceFactor: template.experienceFactor,
+        pointBuySpent: template.pointBuySpent,
+        hp: template.hp,
+        maxHp: template.maxHp,
+        purchasedStats: JSON.stringify(template.purchasedStats),
+        raceStats: JSON.stringify(template.raceStats),
+        classStats: JSON.stringify(template.classStats),
+        finalStats: JSON.stringify(template.finalStats),
+        skills: JSON.stringify(template.skills),
+        equipment: JSON.stringify(template.equipment),
+        inventory: JSON.stringify(template.inventory || []),
+        equipmentSlots: JSON.stringify(template.equipmentSlots || {}),
+        knownSpells: JSON.stringify(template.knownSpells || []),
+        mana: template.mana ?? 0,
+        maxMana: template.maxMana ?? 0,
         mapId: "town_1",
         x: initialPosition.x,
         y: initialPosition.y,
@@ -140,9 +198,27 @@ export function createDatabase() {
         character.id,
         character.accountId,
         character.name,
+        character.raceId,
+        character.raceName,
+        character.classId,
+        character.className,
         character.level,
+        character.experiencePoints,
+        character.experienceFactor,
+        character.pointBuySpent,
         character.hp,
         character.maxHp,
+        character.purchasedStats,
+        character.raceStats,
+        character.classStats,
+        character.finalStats,
+        character.skills,
+        character.equipment,
+        character.inventory,
+        character.equipmentSlots,
+        character.knownSpells,
+        character.mana,
+        character.maxMana,
         character.mapId,
         character.x,
         character.y,
@@ -150,21 +226,52 @@ export function createDatabase() {
         character.updatedAt
       );
 
-      return statements.selectCharacterById.get(character.id);
+      return deserializeCharacterRow(statements.selectCharacterById.get(character.id));
     },
 
     getCharacterById(characterId) {
-      return statements.selectCharacterById.get(characterId) || null;
+      const row = statements.selectCharacterById.get(characterId);
+      return row ? deserializeCharacterRow(row) : null;
     },
 
     updateCharacterPosition(characterId, x, y) {
       statements.updateCharacterPosition.run(x, y, nowIso(), characterId);
-      return statements.selectCharacterById.get(characterId);
+      return this.getCharacterById(characterId);
     },
 
     updateCharacterMap(characterId, mapId) {
       statements.updateCharacterMap.run(mapId, nowIso(), characterId);
-      return statements.selectCharacterById.get(characterId);
+      return this.getCharacterById(characterId);
+    },
+
+    updateCharacterState(characterId, patch) {
+      const current = this.getCharacterById(characterId);
+      if (!current) return null;
+
+      const next = {
+        hp: patch.hp ?? current.hp,
+        maxHp: patch.maxHp ?? current.maxHp,
+        mana: patch.mana ?? current.mana ?? 0,
+        maxMana: patch.maxMana ?? current.maxMana ?? 0,
+        experiencePoints: patch.experiencePoints ?? current.experiencePoints ?? 0,
+        inventory: JSON.stringify(patch.inventory ?? current.inventory ?? []),
+        equipmentSlots: JSON.stringify(patch.equipmentSlots ?? current.equipmentSlots ?? {}),
+        updatedAt: nowIso()
+      };
+
+      statements.updateCharacterState.run(
+        next.hp,
+        next.maxHp,
+        next.mana,
+        next.maxMana,
+        next.experiencePoints,
+        next.inventory,
+        next.equipmentSlots,
+        next.updatedAt,
+        characterId
+      );
+
+      return this.getCharacterById(characterId);
     },
 
     createSession(accountId, characterId) {
@@ -206,7 +313,7 @@ export function createDatabase() {
         leaderCharacterId: membership.leaderCharacterId,
         createdAt: membership.createdAt,
         updatedAt: membership.updatedAt,
-        members: statements.selectPartyMembers.all(membership.id)
+        members: statements.selectPartyMembers.all(membership.id).map(deserializeCharacterRow)
       };
     },
 
@@ -309,7 +416,7 @@ export function createDatabase() {
 
       return {
         ...instance,
-        members: statements.selectInstanceMembers.all(instance.id)
+        members: statements.selectInstanceMembers.all(instance.id).map(deserializeCharacterRow)
       };
     },
 
@@ -347,27 +454,44 @@ function createStatements(db) {
     touchAccount: db.prepare("UPDATE accounts SET updated_at = ? WHERE id = ?"),
 
     selectCharactersByAccount: db.prepare(`
-      SELECT id, account_id AS accountId, name, level, hp, max_hp AS maxHp, map_id AS mapId, x, y, created_at AS createdAt, updated_at AS updatedAt
+      SELECT id, account_id AS accountId, name, race_id AS raceId, race_name AS raceName, class_id AS classId, class_name AS className,
+        level, experience_points AS experiencePoints, experience_factor AS experienceFactor, point_buy_spent AS pointBuySpent,
+        hp, max_hp AS maxHp, purchased_stats AS purchasedStats, race_stats AS raceStats, class_stats AS classStats,
+        final_stats AS finalStats, skills, equipment, inventory, equipment_slots AS equipmentSlots, known_spells AS knownSpells,
+        mana, max_mana AS maxMana, map_id AS mapId, x, y, created_at AS createdAt, updated_at AS updatedAt
       FROM characters
       WHERE account_id = ?
       ORDER BY updated_at DESC, name ASC
     `),
     selectCharacterById: db.prepare(`
-      SELECT id, account_id AS accountId, name, level, hp, max_hp AS maxHp, map_id AS mapId, x, y, created_at AS createdAt, updated_at AS updatedAt
+      SELECT id, account_id AS accountId, name, race_id AS raceId, race_name AS raceName, class_id AS classId, class_name AS className,
+        level, experience_points AS experiencePoints, experience_factor AS experienceFactor, point_buy_spent AS pointBuySpent,
+        hp, max_hp AS maxHp, purchased_stats AS purchasedStats, race_stats AS raceStats, class_stats AS classStats,
+        final_stats AS finalStats, skills, equipment, inventory, equipment_slots AS equipmentSlots, known_spells AS knownSpells,
+        mana, max_mana AS maxMana, map_id AS mapId, x, y, created_at AS createdAt, updated_at AS updatedAt
       FROM characters
       WHERE id = ?
     `),
     selectCharacterByName: db.prepare(`
-      SELECT id, account_id AS accountId, name, level, hp, max_hp AS maxHp, map_id AS mapId, x, y, created_at AS createdAt, updated_at AS updatedAt
+      SELECT id
       FROM characters
       WHERE lower(name) = lower(?)
     `),
     insertCharacter: db.prepare(`
-      INSERT INTO characters (id, account_id, name, level, hp, max_hp, map_id, x, y, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO characters (
+        id, account_id, name, race_id, race_name, class_id, class_name, level, experience_points, experience_factor,
+        point_buy_spent, hp, max_hp, purchased_stats, race_stats, class_stats, final_stats, skills, equipment,
+        inventory, equipment_slots, known_spells, mana, max_mana, map_id, x, y, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     updateCharacterPosition: db.prepare("UPDATE characters SET x = ?, y = ?, updated_at = ? WHERE id = ?"),
     updateCharacterMap: db.prepare("UPDATE characters SET map_id = ?, updated_at = ? WHERE id = ?"),
+    updateCharacterState: db.prepare(`
+      UPDATE characters
+      SET hp = ?, max_hp = ?, mana = ?, max_mana = ?, experience_points = ?, inventory = ?, equipment_slots = ?, updated_at = ?
+      WHERE id = ?
+    `),
 
     insertSession: db.prepare(`
       INSERT INTO sessions (token, account_id, character_id, created_at, updated_at)
@@ -396,7 +520,12 @@ function createStatements(db) {
       WHERE pm.character_id = ?
     `),
     selectPartyMembers: db.prepare(`
-      SELECT c.id AS characterId, c.name, c.level, c.hp, c.max_hp AS maxHp, c.map_id AS mapId
+      SELECT c.id AS characterId, c.account_id AS accountId, c.name, c.race_id AS raceId, c.race_name AS raceName,
+        c.class_id AS classId, c.class_name AS className, c.level, c.experience_points AS experiencePoints,
+        c.experience_factor AS experienceFactor, c.hp, c.max_hp AS maxHp, c.purchased_stats AS purchasedStats,
+        c.race_stats AS raceStats, c.class_stats AS classStats, c.final_stats AS finalStats, c.skills,
+        c.equipment, c.inventory, c.equipment_slots AS equipmentSlots, c.known_spells AS knownSpells,
+        c.mana, c.max_mana AS maxMana, c.map_id AS mapId
       FROM party_members pm
       JOIN characters c ON c.id = pm.character_id
       WHERE pm.party_id = ?
@@ -425,7 +554,12 @@ function createStatements(db) {
       WHERE id = ?
     `),
     selectInstanceMembers: db.prepare(`
-      SELECT c.id AS characterId, c.name, c.level, c.hp, c.max_hp AS maxHp, c.map_id AS mapId
+      SELECT c.id AS characterId, c.account_id AS accountId, c.name, c.race_id AS raceId, c.race_name AS raceName,
+        c.class_id AS classId, c.class_name AS className, c.level, c.experience_points AS experiencePoints,
+        c.experience_factor AS experienceFactor, c.hp, c.max_hp AS maxHp, c.purchased_stats AS purchasedStats,
+        c.race_stats AS raceStats, c.class_stats AS classStats, c.final_stats AS finalStats, c.skills,
+        c.equipment, c.inventory, c.equipment_slots AS equipmentSlots, c.known_spells AS knownSpells,
+        c.mana, c.max_mana AS maxMana, c.map_id AS mapId
       FROM instance_members im
       JOIN characters c ON c.id = im.character_id
       WHERE im.instance_id = ?
@@ -440,6 +574,102 @@ function createStatements(db) {
     deleteInstanceMember: db.prepare("DELETE FROM instance_members WHERE character_id = ?"),
     updateDungeonInstanceStatus: db.prepare("UPDATE dungeon_instances SET status = ?, updated_at = ? WHERE id = ?")
   };
+}
+
+function ensureColumn(db, tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+}
+
+function deserializeCharacterRow(row) {
+  const inventory = parseJson(row.inventory, []);
+  const equipmentSlots = normalizeEquipmentSlots(parseJson(row.equipmentSlots, {}), inventory);
+  const finalStats = parseJson(row.finalStats, {});
+  const knownSpells = normalizeKnownSpells(row.classId, row.level, parseJson(row.knownSpells, []));
+  const maxMana = normalizeMaxMana(row.classId, finalStats, row.maxMana);
+  const mana = normalizeMana(maxMana, row.mana);
+
+  return {
+    ...row,
+    purchasedStats: parseJson(row.purchasedStats, {}),
+    raceStats: parseJson(row.raceStats, {}),
+    classStats: parseJson(row.classStats, {}),
+    finalStats,
+    skills: parseJson(row.skills, {}),
+    equipment: parseJson(row.equipment, []),
+    inventory,
+    equipmentSlots,
+    knownSpells,
+    mana,
+    maxMana
+  };
+}
+
+function normalizeEquipmentSlots(equipmentSlots, inventory) {
+  const normalized = {
+    weapon: null,
+    ranged: null,
+    armour: null,
+    shield: null,
+    light: null,
+    book: null,
+    ...equipmentSlots
+  };
+
+  for (const item of inventory) {
+    if (!item?.equipped) continue;
+    const slot = mapInventorySlotToEquipmentSlot(item.slot);
+    if (slot && !normalized[slot]) {
+      normalized[slot] = item.id;
+    }
+  }
+
+  return normalized;
+}
+
+function mapInventorySlotToEquipmentSlot(slot) {
+  if (["sword", "hafted"].includes(slot)) return "weapon";
+  if (slot === "bow") return "ranged";
+  if (slot === "soft armour") return "armour";
+  if (slot === "shield") return "shield";
+  if (slot === "light") return "light";
+  if (["prayer book", "magic book", "nature book", "shadow book"].includes(slot)) return "book";
+  return null;
+}
+
+function normalizeKnownSpells(classId, level, knownSpells) {
+  if (knownSpells.length > 0) {
+    return knownSpells;
+  }
+
+  return getAvailableSpellsForClass(classId, level);
+}
+
+function normalizeMaxMana(classId, finalStats, value) {
+  const numericValue = Number(value ?? 0);
+  if (numericValue > 0) {
+    return numericValue;
+  }
+
+  return getStartingManaForClass(classId, finalStats);
+}
+
+function normalizeMana(maxMana, value) {
+  const numericValue = Number(value ?? 0);
+  if (numericValue > 0) {
+    return Math.min(numericValue, maxMana);
+  }
+
+  return maxMana;
+}
+
+function parseJson(value, fallback) {
+  try {
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function normalizeName(value, maxLength) {

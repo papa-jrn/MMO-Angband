@@ -33,7 +33,7 @@
       }
 
       main {
-        max-width: 1200px;
+        max-width: 1480px;
         margin: 0 auto;
         padding: 24px;
       }
@@ -45,8 +45,9 @@
 
       .layout {
         display: grid;
-        grid-template-columns: 320px 1fr 320px;
+        grid-template-columns: 310px minmax(0, 1fr) 260px;
         gap: 16px;
+        align-items: start;
       }
 
       .panel {
@@ -57,9 +58,116 @@
         box-shadow: 0 16px 40px rgba(0, 0, 0, 0.24);
       }
 
+      .center-panel {
+        min-height: 820px;
+      }
+
+      .center-topbar {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
       .stack {
         display: grid;
         gap: 12px;
+      }
+
+      .builder-grid,
+      .stat-row,
+      .summary-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .stat-line {
+        display: grid;
+        grid-template-columns: 44px 78px 1fr;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .stat-line span {
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      .summary-card {
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .toolbar-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .inventory-list {
+        display: grid;
+        gap: 8px;
+        max-height: 220px;
+        overflow: auto;
+      }
+
+      .action-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .inventory-row {
+        display: grid;
+        gap: 8px;
+      }
+
+      .inventory-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .inventory-actions button {
+        width: auto;
+      }
+
+      .modal-shell {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(5, 8, 12, 0.78);
+        backdrop-filter: blur(8px);
+        z-index: 20;
+      }
+
+      .modal-shell[data-open="true"] {
+        display: flex;
+      }
+
+      .modal-card {
+        width: min(880px, 100%);
+        max-height: min(90vh, 900px);
+        overflow: auto;
+        background: rgba(26, 34, 48, 0.98);
+        border: 1px solid rgba(214, 168, 79, 0.18);
+        border-radius: 20px;
+        padding: 20px;
+        box-shadow: 0 22px 60px rgba(0, 0, 0, 0.35);
+      }
+
+      .modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .modal-close {
+        width: auto;
+        min-width: 44px;
       }
 
       label {
@@ -94,13 +202,16 @@
         background: var(--grid);
         padding: 8px;
         border-radius: 12px;
+        min-height: 720px;
+        align-content: stretch;
       }
 
       .cell {
         aspect-ratio: 1;
         display: grid;
         place-items: center;
-        font-size: 0.85rem;
+        font-size: 1.15rem;
+        font-family: "Consolas", "Courier New", monospace;
         border-radius: 6px;
         background: rgba(255, 255, 255, 0.03);
         color: var(--muted);
@@ -116,7 +227,14 @@
       .chat-log {
         display: grid;
         gap: 8px;
-        max-height: 420px;
+        max-height: 280px;
+        overflow: auto;
+      }
+
+      .dungeon-log {
+        display: grid;
+        gap: 8px;
+        max-height: 220px;
         overflow: auto;
       }
 
@@ -136,6 +254,22 @@
         grid-template-columns: repeat(3, 42px);
         gap: 6px;
         justify-content: center;
+      }
+
+      .map-chat {
+        display: grid;
+        gap: 12px;
+      }
+
+      .chat-compose {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: end;
+      }
+
+      .chat-compose button {
+        width: 140px;
       }
 
       .inline-actions {
@@ -186,71 +320,166 @@
             Character
             <select id="character-select"></select>
           </label>
-          <label>
-            New Character
-            <input id="new-character-name" maxlength="24" placeholder="Create a new adventurer..." />
-          </label>
-          <button id="create-character-button">Create Character</button>
-          <button id="login-button">Enter Town</button>
-
-          <h2>Movement</h2>
-          <div class="controls">
-            <button class="move-key" data-direction="northwest" data-key="7">↖<small>7</small></button>
-            <button class="move-key" data-direction="north" data-key="8">↑<small>8</small></button>
-            <button class="move-key" data-direction="northeast" data-key="9">↗<small>9</small></button>
-            <button class="move-key" data-direction="west" data-key="4">←<small>4</small></button>
-            <button class="move-key" disabled>•<small>5</small></button>
-            <button class="move-key" data-direction="east" data-key="6">→<small>6</small></button>
-            <button class="move-key" data-direction="southwest" data-key="1">↙<small>1</small></button>
-            <button class="move-key" data-direction="south" data-key="2">↓<small>2</small></button>
-            <button class="move-key" data-direction="southeast" data-key="3">↘<small>3</small></button>
+          <div class="toolbar-row">
+            <button id="open-character-modal-button">Create Character</button>
+            <button id="login-button">Enter Town</button>
           </div>
-          <p class="muted">Use numpad or number keys: `7 8 9 / 4 6 / 1 2 3`.</p>
+          <button id="open-party-modal-button">Party</button>
+          <div id="selected-character-summary" class="summary-list"></div>
+
+          <h2>Inventory</h2>
+          <div id="inventory-list" class="inventory-list"></div>
+
+          <h2>Equipment</h2>
+          <div id="equipment-list" class="inventory-list"></div>
+
+          <h2>Magic</h2>
+          <div id="spell-list" class="inventory-list"></div>
         </section>
 
-        <section class="panel stack">
-          <h2>Town</h2>
+        <section class="panel stack center-panel">
+          <div class="center-topbar">
+            <button id="launch-solo-button">Launch Solo Run</button>
+            <button id="launch-party-button">Launch Party Run</button>
+            <button id="return-town-button">Return To Town</button>
+          </div>
+          <h2>Town / Dungeon</h2>
           <div id="town-grid" class="town-grid"></div>
+          <div class="map-chat">
+            <h2>Town Chat</h2>
+            <div id="chat-log" class="chat-log"></div>
+            <div class="chat-compose">
+              <label>
+                Message
+                <input id="chat-input" maxlength="280" placeholder="Say something to town..." />
+              </label>
+              <button id="chat-send">Send</button>
+            </div>
+          </div>
         </section>
 
         <section class="panel stack">
-          <h2>Party</h2>
-          <div id="party-summary" class="presence-list"></div>
-          <label>
-            Party Name
-            <input id="party-name" maxlength="32" placeholder="Dungeon Party" />
-          </label>
-          <button id="create-party-button">Create Party</button>
-          <label>
-            Join Party ID
-            <input id="join-party-id" maxlength="64" placeholder="party_..." />
-          </label>
-          <button id="join-party-button">Join Party</button>
-          <button id="leave-party-button">Leave Party</button>
-
           <h2>Dungeon Run</h2>
           <div id="instance-summary" class="presence-list"></div>
-          <button id="launch-solo-button">Launch Solo Run</button>
-          <button id="launch-party-button">Launch Party Run</button>
-          <button id="return-town-button">Return To Town</button>
-          <div class="inline-actions">
-            <button id="use-up-stairs-button">Use &gt;</button>
-            <button id="use-down-stairs-button">Use &lt;</button>
-          </div>
+
+          <h2>Party</h2>
+          <div id="party-summary" class="presence-list"></div>
 
           <h2>Players</h2>
           <div id="presence-list" class="presence-list"></div>
 
-          <h2>Town Chat</h2>
-          <div id="chat-log" class="chat-log"></div>
-          <label>
-            Message
-            <input id="chat-input" maxlength="280" placeholder="Say something to town..." />
-          </label>
-          <button id="chat-send">Send</button>
+          <h2>Dungeon Actions</h2>
+          <div class="action-list">
+            <button id="pickup-item-button">Pick Up Item (G)</button>
+            <button id="melee-attack-button">Melee Attack</button>
+            <button id="ranged-attack-button">Ranged Attack</button>
+            <button id="rest-button">Rest 10 Turns (R)</button>
+            <div class="inline-actions">
+              <button id="use-up-stairs-button">Use &gt;</button>
+              <button id="use-down-stairs-button">Use &lt;</button>
+            </div>
+          </div>
+
+          <h2>Dungeon Log</h2>
+          <div id="dungeon-log" class="dungeon-log"></div>
+
+          <h2>Movement</h2>
+          <div class="controls">
+            <button class="move-key" data-direction="northwest" data-key="7">â†–<small>7</small></button>
+            <button class="move-key" data-direction="north" data-key="8">â†‘<small>8</small></button>
+            <button class="move-key" data-direction="northeast" data-key="9">â†—<small>9</small></button>
+            <button class="move-key" data-direction="west" data-key="4">â†<small>4</small></button>
+            <button class="move-key" disabled>â€¢<small>5</small></button>
+            <button class="move-key" data-direction="east" data-key="6">â†’<small>6</small></button>
+            <button class="move-key" data-direction="southwest" data-key="1">â†™<small>1</small></button>
+            <button class="move-key" data-direction="south" data-key="2">â†“<small>2</small></button>
+            <button class="move-key" data-direction="southeast" data-key="3">â†˜<small>3</small></button>
+          </div>
+          <p class="muted">Use numpad or number keys: `7 8 9 / 4 6 / 1 2 3`.</p>
         </section>
       </div>
     </main>
+
+    <div id="character-modal" class="modal-shell" data-open="false">
+      <section class="modal-card stack" aria-modal="true" role="dialog" aria-labelledby="character-modal-title">
+        <div class="modal-header">
+          <div>
+            <h2 id="character-modal-title">Create Character</h2>
+            <p class="muted">Build your adventurer with Angband-inspired race and class data plus a 35-point buy.</p>
+          </div>
+          <button id="close-character-modal-button" class="modal-close">Close</button>
+        </div>
+
+        <label>
+          New Character
+          <input id="new-character-name" maxlength="24" placeholder="Create a new adventurer..." />
+        </label>
+        <label>
+          Race
+          <select id="race-select"></select>
+        </label>
+        <label>
+          Class
+          <select id="class-select"></select>
+        </label>
+        <div class="builder-grid">
+          <div id="point-buy-summary" class="summary-card muted"></div>
+          <div class="stat-row">
+            <label class="stat-line">
+              <span>STR</span>
+              <input id="stat-strength" type="number" min="8" max="15" step="1" value="8" />
+              <small id="final-strength" class="muted"></small>
+            </label>
+            <label class="stat-line">
+              <span>INT</span>
+              <input id="stat-intelligence" type="number" min="8" max="15" step="1" value="8" />
+              <small id="final-intelligence" class="muted"></small>
+            </label>
+            <label class="stat-line">
+              <span>WIS</span>
+              <input id="stat-wisdom" type="number" min="8" max="15" step="1" value="8" />
+              <small id="final-wisdom" class="muted"></small>
+            </label>
+            <label class="stat-line">
+              <span>DEX</span>
+              <input id="stat-dexterity" type="number" min="8" max="15" step="1" value="8" />
+              <small id="final-dexterity" class="muted"></small>
+            </label>
+            <label class="stat-line">
+              <span>CON</span>
+              <input id="stat-constitution" type="number" min="8" max="15" step="1" value="8" />
+              <small id="final-constitution" class="muted"></small>
+            </label>
+          </div>
+          <div id="creation-summary" class="summary-list"></div>
+        </div>
+        <button id="create-character-button">Create Character</button>
+      </section>
+    </div>
+
+    <div id="party-modal" class="modal-shell" data-open="false">
+      <section class="modal-card stack" aria-modal="true" role="dialog" aria-labelledby="party-modal-title">
+        <div class="modal-header">
+          <div>
+            <h2 id="party-modal-title">Party</h2>
+            <p class="muted">Create, join, or leave a party without crowding the main play screen.</p>
+          </div>
+          <button id="close-party-modal-button" class="modal-close">Close</button>
+        </div>
+        <div id="party-modal-summary" class="presence-list"></div>
+        <label>
+          Party Name
+          <input id="party-name" maxlength="32" placeholder="Dungeon Party" />
+        </label>
+        <button id="create-party-button">Create Party</button>
+        <label>
+          Join Party ID
+          <input id="join-party-id" maxlength="64" placeholder="party_..." />
+        </label>
+        <button id="join-party-button">Join Party</button>
+        <button id="leave-party-button">Leave Party</button>
+      </section>
+    </div>
 
     <script>
       import "../scripts/town-client.js";
