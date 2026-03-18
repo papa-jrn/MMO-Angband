@@ -110,10 +110,39 @@ export function getAvailableSpellsForClass(classId, level = 1) {
     .map((spell) => ({ ...spell }));
 }
 
+export function getClassSpellCatalog() {
+  return classEntries.map((playerClass) => ({
+    id: playerClass.id,
+    name: playerClass.name,
+    spellcastingStat: getSpellStat(playerClass.id),
+    books: (playerClass.books || []).map((book) => ({
+      ...book,
+      spells: (book.spells || []).map((spell) => ({ ...spell }))
+    }))
+  }));
+}
+
 export function getStartingManaForClass(classId, finalStats) {
   const playerClass = classMap.get(String(classId || ""));
   if (!playerClass) return 0;
   return calculateStartingMana(playerClass, finalStats);
+}
+
+export function getStartingLoadoutForClass(classId) {
+  const playerClass = classMap.get(String(classId || ""));
+  if (!playerClass) {
+    return {
+      equipment: [],
+      inventory: [],
+      equipmentSlots: createStartingEquipmentSlots([])
+    };
+  }
+
+  return {
+    equipment: structuredClone(playerClass.equipment || []),
+    inventory: createStartingInventory(playerClass.equipment),
+    equipmentSlots: createStartingEquipmentSlots(playerClass.equipment)
+  };
 }
 
 function parseRaceEntries(source) {
@@ -183,8 +212,11 @@ function parseClassEntries(source) {
         exp: 0,
         equipment: [],
         spells: [],
+        books: [],
         currentBook: null,
-        currentBookQuality: null
+        currentBookQuality: null,
+        currentBookEntry: null,
+        currentSpellEntry: null
       };
       continue;
     }
@@ -228,25 +260,60 @@ function parseClassEntries(source) {
     }
 
     if (line.startsWith("book:")) {
-      const [, , quality, bookName, , realm] = line.split(":");
+      const [, itemType, quality, bookName, spellCount, realm] = line.split(":");
       current.currentBook = bookName;
       current.currentBookQuality = quality;
       current.currentRealm = realm;
+      current.currentBookEntry = {
+        id: slugify(`${current.id}-${bookName}-${quality}`),
+        itemType,
+        quality,
+        name: bookName,
+        spellCount: Number(spellCount || 0),
+        realm
+      };
+      current.books.push({
+        ...current.currentBookEntry,
+        spells: []
+      });
+      current.currentSpellEntry = null;
       continue;
     }
 
     if (line.startsWith("spell:")) {
-      const [, spellName, level, mana, fail] = line.split(":");
+      const [, spellName, level, mana, fail, exp] = line.split(":");
+      const spellEntry = {
+        id: slugify(spellName),
+        name: spellName,
+        level: Number(level),
+        mana: Number(mana),
+        fail: Number(fail || 0),
+        experience: Number(exp || 0),
+        realm: current.currentRealm || "arcane",
+        bookName: current.currentBook,
+        bookQuality: current.currentBookQuality,
+        description: ""
+      };
+      const activeBook = current.books[current.books.length - 1];
+      if (activeBook) {
+        activeBook.spells.push(spellEntry);
+      }
+      current.currentSpellEntry = activeBook?.spells?.[activeBook.spells.length - 1] || null;
+
       if (current.currentBookQuality === "town") {
-        current.spells.push({
-          id: slugify(spellName),
-          name: spellName,
-          level: Number(level),
-          mana: Number(mana),
-          fail: Number(fail || 0),
-          realm: current.currentRealm || "arcane",
-          bookName: current.currentBook
-        });
+        current.spells.push({ ...spellEntry });
+      }
+      continue;
+    }
+
+    if (line.startsWith("desc:") && current.currentSpellEntry) {
+      current.currentSpellEntry.description = [current.currentSpellEntry.description, line.slice(5).trim()]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      const townSpell = current.spells[current.spells.length - 1];
+      if (townSpell?.id === current.currentSpellEntry.id && townSpell.bookName === current.currentSpellEntry.bookName) {
+        townSpell.description = current.currentSpellEntry.description;
       }
     }
   }
@@ -267,10 +334,19 @@ function parseStatLine(value) {
 }
 
 function finalizeEntry(entry) {
+  const {
+    currentBook,
+    currentBookQuality,
+    currentBookEntry,
+    currentSpellEntry,
+    currentRealm,
+    ...stableEntry
+  } = entry;
+
   return {
-    ...entry,
+    ...stableEntry,
     statSummary: STAT_KEYS.map((key) => {
-      const value = Number(entry.stats[key] || 0);
+      const value = Number(stableEntry.stats[key] || 0);
       return `${key.slice(0, 3).toUpperCase()} ${value >= 0 ? "+" : ""}${value}`;
     }).join(", ")
   };

@@ -3,15 +3,17 @@ import { URL } from "node:url";
 import { WebSocketServer } from "ws";
 import { ALL_DIRECTIONS, CHAT_CHANNELS, DIRECTIONS, MESSAGE_TYPES } from "@angband-town-online/protocol";
 import { createChatMessage } from "./chat/chat-service.js";
-import { buildCharacterTemplate, getCharacterCreationOptions } from "./game/angband-character-data.js";
+import { buildCharacterTemplate, getAvailableSpellsForClass, getCharacterCreationOptions, getStartingLoadoutForClass } from "./game/angband-character-data.js";
 import { sendJson, readJsonBody } from "./http/json.js";
 import { createDatabase } from "./storage/database.js";
 import {
-  advanceMonsters,
+  assertPlayerTurn,
   castSpell,
   createInstanceRuntime,
   createNextFloorRuntime,
+  ensureEncounter,
   equipItem,
+  finishPlayerTurn,
   getInstanceTile,
   moveInstancePlayer,
   performMeleeAttack,
@@ -430,20 +432,28 @@ function handleMove(socket, session, message) {
     return;
   }
 
-  const result = moveInstancePlayer(runtime, session.characterId, message.direction);
+  try {
+    assertPlayerTurn(runtime, session.characterId);
+    const result = moveInstancePlayer(runtime, session.characterId, message.direction);
 
-  if (!result.acted) {
-    return broadcastInstance(instance.id, serializeInstance(instance, runtime));
+    if (!result.acted) {
+      return broadcastInstance(instance.id, serializeInstance(instance, runtime));
+    }
+
+    if (result.moved) {
+      const updatedCharacter = db.updateCharacterPosition(session.characterId, result.player.x, result.player.y);
+      syncRuntimePlayer(runtime, updatedCharacter);
+    }
+
+    finishPlayerTurn(runtime, session.characterId);
+    persistAllRuntimePlayers(runtime);
+    broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to act in the dungeon."
+    });
   }
-
-  if (result.moved) {
-    const updatedCharacter = db.updateCharacterPosition(session.characterId, result.player.x, result.player.y);
-    syncRuntimePlayer(runtime, updatedCharacter);
-  }
-
-  advanceMonsters(runtime);
-  persistAllRuntimePlayers(runtime);
-  broadcastInstance(instance.id, serializeInstance(instance, runtime));
 }
 
 function handleTownRest(socket, session, message) {
@@ -594,9 +604,18 @@ function handleInstancePickup(socket, session) {
     return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
   }
 
-  pickupItem(runtime, session.characterId);
-  persistRuntimePlayer(session.characterId, runtime);
-  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  try {
+    assertPlayerTurn(runtime, session.characterId);
+    pickupItem(runtime, session.characterId);
+    finishPlayerTurn(runtime, session.characterId);
+    persistAllRuntimePlayers(runtime);
+    broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to pick up the item."
+    });
+  }
 }
 
 function handleInstanceAttack(socket, session) {
@@ -606,10 +625,18 @@ function handleInstanceAttack(socket, session) {
     return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
   }
 
-  performMeleeAttack(runtime, session.characterId);
-  advanceMonsters(runtime);
-  persistAllRuntimePlayers(runtime);
-  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  try {
+    assertPlayerTurn(runtime, session.characterId);
+    performMeleeAttack(runtime, session.characterId);
+    finishPlayerTurn(runtime, session.characterId);
+    persistAllRuntimePlayers(runtime);
+    broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to attack."
+    });
+  }
 }
 
 function handleInstanceRangedAttack(socket, session) {
@@ -619,10 +646,20 @@ function handleInstanceRangedAttack(socket, session) {
     return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
   }
 
-  performRangedAttack(runtime, session.characterId);
-  advanceMonsters(runtime);
-  persistAllRuntimePlayers(runtime);
-  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  try {
+    assertPlayerTurn(runtime, session.characterId);
+    const result = performRangedAttack(runtime, session.characterId);
+    if (result.acted) {
+      finishPlayerTurn(runtime, session.characterId);
+    }
+    persistAllRuntimePlayers(runtime);
+    broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to make the ranged attack."
+    });
+  }
 }
 
 function handleInstanceCastSpell(socket, session, message) {
@@ -633,8 +670,9 @@ function handleInstanceCastSpell(socket, session, message) {
   }
 
   try {
+    assertPlayerTurn(runtime, session.characterId);
     castSpell(runtime, session.characterId, message.spellId);
-    advanceMonsters(runtime);
+    finishPlayerTurn(runtime, session.characterId);
     persistAllRuntimePlayers(runtime);
     broadcastInstance(instance.id, serializeInstance(instance, runtime));
   } catch (error) {
@@ -652,9 +690,18 @@ function handleInstanceRest(socket, session, message) {
     return send(socket, { type: MESSAGE_TYPES.SYSTEM_ERROR, message: "No active dungeon run found." });
   }
 
-  restPlayer(runtime, session.characterId, message.turns);
-  persistAllRuntimePlayers(runtime);
-  broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  try {
+    assertPlayerTurn(runtime, session.characterId);
+    restPlayer(runtime, session.characterId, message.turns);
+    finishPlayerTurn(runtime, session.characterId);
+    persistAllRuntimePlayers(runtime);
+    broadcastInstance(instance.id, serializeInstance(instance, runtime));
+  } catch (error) {
+    send(socket, {
+      type: MESSAGE_TYPES.SYSTEM_ERROR,
+      message: error instanceof Error ? error.message : "Unable to rest."
+    });
+  }
 }
 
 function handleEquip(socket, session, message) {
@@ -829,6 +876,7 @@ function handleUseStairs(socket, session, message) {
   }
 
   const nextRuntime = createNextFloorRuntime(instance, runtime);
+  ensureEncounter(nextRuntime);
   instanceRuntimes.set(instance.id, nextRuntime);
   const payload = serializeInstance(instance, nextRuntime);
 
@@ -853,7 +901,9 @@ function getActiveInstancePayload(characterId) {
 
 function ensureInstanceRuntime(instance) {
   if (!instanceRuntimes.has(instance.id)) {
-    instanceRuntimes.set(instance.id, createInstanceRuntime(instance));
+    const runtime = createInstanceRuntime(instance);
+    ensureEncounter(runtime);
+    instanceRuntimes.set(instance.id, runtime);
   }
 
   return instanceRuntimes.get(instance.id);
@@ -928,11 +978,13 @@ function createCharacterStateProxy(character) {
 
 function authenticateCharacter(accountId, characterId, sessionToken) {
   const account = db.getAccountById(accountId);
-  const character = db.getCharacterById(characterId);
+  let character = db.getCharacterById(characterId);
 
   if (!account || !character || character.accountId !== account.id) {
     throw new Error("Invalid account or character.");
   }
+
+  character = ensureCharacterStartingLoadout(character);
 
   if (sessionToken) {
     const persistedSession = db.getSession(sessionToken);
@@ -961,4 +1013,28 @@ function authenticateCharacter(accountId, characterId, sessionToken) {
 
 function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function ensureCharacterStartingLoadout(character) {
+  if (!character) return null;
+  const updates = {};
+
+  if ((character.inventory || []).length === 0) {
+    const loadout = getStartingLoadoutForClass(character.classId);
+    if (loadout.inventory.length) {
+      updates.inventory = loadout.inventory;
+      updates.equipmentSlots = loadout.equipmentSlots;
+    }
+  }
+
+  const refreshedSpells = getAvailableSpellsForClass(character.classId, character.level);
+  if (refreshedSpells.length > 0) {
+    updates.knownSpells = refreshedSpells;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return character;
+  }
+
+  return db.updateCharacterState(character.id, updates);
 }

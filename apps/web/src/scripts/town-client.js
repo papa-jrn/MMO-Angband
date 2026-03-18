@@ -46,7 +46,8 @@ const state = {
     }
   },
   party: null,
-  activeInstance: null
+  activeInstance: null,
+  previousRuntime: null
 };
 
 const KEY_TO_DIRECTION = {
@@ -74,6 +75,8 @@ const elements = {
   partySummary: document.getElementById("party-summary"),
   partyModalSummary: document.getElementById("party-modal-summary"),
   instanceSummary: document.getElementById("instance-summary"),
+  projectileLayer: document.getElementById("projectile-layer"),
+  mapViewport: document.getElementById("map-viewport"),
   chatLog: document.getElementById("chat-log"),
   connectionStatus: document.getElementById("connection-status"),
   accountName: document.getElementById("account-name"),
@@ -93,7 +96,6 @@ const elements = {
   selectedCharacterSummary: document.getElementById("selected-character-summary"),
   inventoryList: document.getElementById("inventory-list"),
   equipmentList: document.getElementById("equipment-list"),
-  dungeonLog: document.getElementById("dungeon-log"),
   spellList: document.getElementById("spell-list"),
   createCharacterButton: document.getElementById("create-character-button"),
   partyName: document.getElementById("party-name"),
@@ -172,7 +174,10 @@ function bindEvents() {
   elements.joinPartyButton.addEventListener("click", joinParty);
   elements.leavePartyButton.addEventListener("click", leaveParty);
   elements.launchSoloButton.addEventListener("click", () => launchInstance("solo"));
-  elements.launchPartyButton.addEventListener("click", () => launchInstance("party"));
+  elements.launchPartyButton.addEventListener("click", () => {
+    launchInstance("party");
+    closePartyModal();
+  });
   elements.returnTownButton.addEventListener("click", returnToTown);
   elements.useUpStairsButton.addEventListener("click", () => useStairs("up"));
   elements.useDownStairsButton.addEventListener("click", () => useStairs("down"));
@@ -387,9 +392,12 @@ function handleMessage(message) {
       break;
     case "party.updated":
       state.party = message.party;
+      state.previousRuntime = state.activeInstance?.runtime || null;
       state.activeInstance = message.activeInstance;
       renderPartySummary();
       renderInstanceSummary();
+      updateDungeonActionState();
+      drawWorld();
       break;
     case "character.updated":
       upsertCharacter(message.character);
@@ -420,13 +428,15 @@ function handleMessage(message) {
       {
       const previousInstanceId = state.activeInstance?.id || "";
       const previousFloor = state.activeInstance?.runtime?.floor || 0;
+      state.previousRuntime = state.activeInstance?.runtime || null;
       state.activeInstance = message.instance;
       drawWorld();
       renderInstanceSummary();
       renderInventory();
       renderEquipment();
       renderSpells();
-      renderDungeonLog();
+      updateDungeonActionState();
+      animateProjectileFromInstanceUpdate(state.previousRuntime, message.instance.runtime);
       setStatus(`Adventuring as ${getSelectedCharacter()?.name || "your character"} on floor ${message.instance.runtime?.floor || 1}.`);
       if (previousInstanceId !== message.instance.id) {
         appendChat({
@@ -442,6 +452,7 @@ function handleMessage(message) {
       break;
       }
     case "instance.returned":
+      state.previousRuntime = state.activeInstance?.runtime || null;
       state.activeInstance = null;
       state.town = message.town;
       drawWorld();
@@ -450,7 +461,7 @@ function handleMessage(message) {
       renderInventory();
       renderEquipment();
       renderSpells();
-      renderDungeonLog();
+      updateDungeonActionState();
       setStatus(`Returned to town as ${getSelectedCharacter()?.name || "your character"}.`);
       appendChat({
         system: true,
@@ -483,8 +494,9 @@ function drawWorld() {
 }
 
 function drawTown(town) {
-  const width = Math.min(town.width || 20, 20);
-  const height = Math.min(town.height || 12, 12);
+  clearProjectiles();
+  const width = town.width || 20;
+  const height = town.height || 12;
   const playerByCell = new Map();
 
   Object.values(town.players || {}).forEach((player) => {
@@ -507,12 +519,15 @@ function drawTown(town) {
       text: "."
     };
   });
+
+  centerViewportOn(state.town.players?.[state.myPlayerId] || null, width, height);
 }
 
 function drawInstance(runtime) {
   const playerByCell = new Map();
   const monsterByCell = new Map();
   const itemByCell = new Map();
+  const activeCharacterId = getActiveTurnCharacterId(runtime);
 
   Object.values(runtime.players || {}).forEach((player) => {
     playerByCell.set(`${player.x},${player.y}`, player);
@@ -528,17 +543,22 @@ function drawInstance(runtime) {
     const player = playerByCell.get(`${x},${y}`);
 
     if (player) {
+      const turnClass = player.characterId === activeCharacterId ? " player-active-turn" : " player-waiting-turn";
+      const turnStyle = player.characterId === activeCharacterId
+        ? "color: var(--active); background: rgba(134, 239, 172, 0.24); border: 1px solid rgba(134, 239, 172, 0.62); box-shadow: inset 0 0 0 1px rgba(134, 239, 172, 0.16), 0 0 16px rgba(134, 239, 172, 0.34);"
+        : "color: var(--caution); background: rgba(250, 204, 21, 0.18); border: 1px solid rgba(250, 204, 21, 0.36); box-shadow: inset 0 0 0 1px rgba(250, 204, 21, 0.1), 0 0 10px rgba(250, 204, 21, 0.18);";
       return {
-        className: "cell player",
+        className: `cell player${turnClass}`,
         text: player.characterId === state.selectedCharacterId ? "@" : "P",
-        title: `${player.name} (${player.x}, ${player.y})`
+        title: `${player.name} (${player.x}, ${player.y})${player.characterId === activeCharacterId ? " - ACTIVE TURN" : ""}`,
+        style: turnStyle
       };
     }
 
     const monster = monsterByCell.get(`${x},${y}`);
     if (monster) {
       return {
-        className: "cell",
+        className: "cell monster",
         text: monster.symbol || "m",
         title: `${monster.name} HP ${monster.hp}/${monster.maxHp}`
       };
@@ -547,7 +567,7 @@ function drawInstance(runtime) {
     const item = itemByCell.get(`${x},${y}`);
     if (item) {
       return {
-        className: "cell",
+        className: "cell item",
         text: item.symbol || "!",
         title: `${item.name} x${item.quantity}`
       };
@@ -559,10 +579,13 @@ function drawInstance(runtime) {
       text: tile
     };
   });
+
+  centerViewportOn(runtime.players?.[state.selectedCharacterId] || null, runtime.width, runtime.height);
 }
 
 function drawGrid(width, height, resolveCell) {
   elements.grid.innerHTML = "";
+  elements.grid.style.setProperty("--grid-width", String(width));
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
@@ -571,6 +594,7 @@ function drawGrid(width, height, resolveCell) {
 
       cell.className = resolved.className;
       cell.textContent = resolved.text;
+      cell.style.cssText = resolved.style || "";
       if (resolved.title) {
         cell.title = resolved.title;
       }
@@ -603,7 +627,7 @@ function renderCharacterOptions() {
   renderInventory();
   renderEquipment();
   renderSpells();
-  renderDungeonLog();
+  renderInstanceSummary();
 }
 
 function renderCharacterCreationOptions() {
@@ -661,7 +685,7 @@ function renderCreationSummary() {
 
 function renderSelectedCharacter() {
   elements.selectedCharacterSummary.innerHTML = "";
-  const character = getSelectedCharacter();
+  const character = getSelectedAdventurer();
 
   if (!character) {
     elements.selectedCharacterSummary.innerHTML = "<div class='summary-card muted'>Create a character to begin.</div>";
@@ -671,7 +695,13 @@ function renderSelectedCharacter() {
   appendSelectedSummary(`Name: ${character.name}`);
   appendSelectedSummary(`Build: ${character.raceName} ${character.className}`);
   appendSelectedSummary(`Level ${character.level}, HP ${character.hp}/${character.maxHp}, Mana ${character.mana ?? 0}/${character.maxMana ?? 0}, XP ${character.experiencePoints}`);
-  appendSelectedSummary(`Stats: ${formatStatsInline(character.finalStats || character.purchasedStats || {})}`);
+  const stats = character.finalStats || character.purchasedStats || {};
+  appendSelectedSummary(`Stats: STR ${stats.strength ?? "-"}, INT ${stats.intelligence ?? "-"}, WIS ${stats.wisdom ?? "-"}`);
+  appendSelectedSummary(`DEX ${stats.dexterity ?? "-"}, CON ${stats.constitution ?? "-"}`);
+  const effects = formatTimedEffects(character.timedEffects);
+  if (effects) {
+    appendSelectedSummary(`Effects: ${effects}`);
+  }
 }
 
 function appendSelectedSummary(text) {
@@ -683,7 +713,7 @@ function appendSelectedSummary(text) {
 
 function renderInventory() {
   elements.inventoryList.innerHTML = "";
-  const character = getSelectedCharacter();
+  const character = getSelectedAdventurer();
 
   if (!character?.inventory?.length) {
     elements.inventoryList.innerHTML = "<div class='presence-item muted'>No inventory yet.</div>";
@@ -699,6 +729,7 @@ function renderInventory() {
     const equipable = mapInventorySlotToEquipmentSlot(item.slot);
     if (equipable) {
       const action = document.createElement("button");
+      action.className = "rounded-xl bg-stone-800 px-3 py-2 text-sm text-[var(--text)] ring-1 ring-[rgba(212,175,95,0.18)] transition hover:bg-stone-700";
       action.dataset.action = item.equipped ? "unequip" : "equip";
       action.dataset.itemId = item.id;
       action.dataset.slotName = equipable;
@@ -712,7 +743,7 @@ function renderInventory() {
 
 function renderEquipment() {
   elements.equipmentList.innerHTML = "";
-  const character = getSelectedCharacter();
+  const character = getSelectedAdventurer();
   const slots = character?.equipmentSlots || {};
   const slotNames = ["weapon", "ranged", "armour", "shield", "light", "book"];
 
@@ -727,7 +758,7 @@ function renderEquipment() {
 
 function renderSpells() {
   elements.spellList.innerHTML = "";
-  const character = getSelectedCharacter();
+  const character = getSelectedAdventurer();
   const spells = character?.knownSpells || [];
 
   if (spells.length === 0) {
@@ -738,10 +769,12 @@ function renderSpells() {
   for (const spell of spells) {
     const entry = document.createElement("div");
     entry.className = "presence-item inventory-row";
-    entry.innerHTML = `<div>${escapeHtml(spell.name)} (${spell.mana} mana)</div>`;
+    const description = spell.description ? `<div class="muted text-xs">${escapeHtml(spell.description)}</div>` : "";
+    entry.innerHTML = `<div><div>${escapeHtml(spell.name)} (${spell.mana} mana)</div><div class="muted text-xs">${escapeHtml(spell.bookName || "Unknown Book")} | Fail ${spell.fail ?? 0}%</div>${description}</div>`;
     const actions = document.createElement("div");
     actions.className = "inventory-actions";
     const castButton = document.createElement("button");
+    castButton.className = "rounded-xl bg-stone-800 px-3 py-2 text-sm text-[var(--text)] ring-1 ring-[rgba(212,175,95,0.18)] transition hover:bg-stone-700";
     castButton.dataset.spellId = spell.id;
     castButton.textContent = "Cast";
     actions.appendChild(castButton);
@@ -751,22 +784,7 @@ function renderSpells() {
 }
 
 function renderDungeonLog() {
-  elements.dungeonLog.innerHTML = "";
-
-  const logEntries = state.activeInstance?.runtime?.log || [];
-  if (logEntries.length === 0) {
-    elements.dungeonLog.innerHTML = "<div class='presence-item muted'>No dungeon events yet.</div>";
-    return;
-  }
-
-  for (const line of logEntries) {
-    const entry = document.createElement("div");
-    entry.className = "presence-item";
-    entry.textContent = line;
-    elements.dungeonLog.appendChild(entry);
-  }
-
-  elements.dungeonLog.scrollTop = elements.dungeonLog.scrollHeight;
+  renderInstanceSummary();
 }
 
 function appendSummaryCard(text) {
@@ -778,10 +796,13 @@ function appendSummaryCard(text) {
 
 function renderPresence() {
   elements.presence.innerHTML = "";
-  const players = Object.values(state.town.players || {});
+  const activeCharacterId = getActiveTurnCharacterId(state.activeInstance?.runtime || null);
+  const players = state.activeInstance?.runtime
+    ? Object.values(state.activeInstance.runtime.players || {})
+    : Object.values(state.town.players || {});
 
   if (players.length === 0) {
-    elements.presence.innerHTML = "<div class='presence-item muted'>No players connected.</div>";
+    elements.presence.innerHTML = `<div class='presence-item muted'>${state.activeInstance?.runtime ? "No party members in the instance." : "No players connected."}</div>`;
     return;
   }
 
@@ -790,7 +811,14 @@ function renderPresence() {
     .forEach((player) => {
       const item = document.createElement("div");
       item.className = "presence-item";
-      item.textContent = `${player.name} Lv.${player.level} HP ${player.hp}/${player.maxHp} at (${player.x}, ${player.y})${player.id === state.myPlayerId ? " - you" : ""}`;
+      const playerId = player.characterId || player.id;
+      const isDungeonPlayer = Boolean(state.activeInstance?.runtime?.players?.[playerId]);
+      const isActiveTurn = activeCharacterId && playerId === activeCharacterId;
+      if (isDungeonPlayer) {
+        item.style.color = isActiveTurn ? "var(--active)" : "var(--caution)";
+        item.style.borderColor = isActiveTurn ? "rgba(134, 239, 172, 0.45)" : "rgba(250, 204, 21, 0.35)";
+      }
+      item.textContent = `${player.name} Lv.${player.level} HP ${player.hp}/${player.maxHp} at (${player.x}, ${player.y})${playerId === state.selectedCharacterId || player.id === state.myPlayerId ? " - you" : ""}`;
       elements.presence.appendChild(item);
     });
 }
@@ -798,10 +826,12 @@ function renderPresence() {
 async function refreshPartyState() {
   renderPartySummary();
   renderInstanceSummary();
+  updatePartyControls();
 
   if (!state.selectedCharacterId) {
     state.party = null;
     state.activeInstance = null;
+    updatePartyControls();
     return;
   }
 
@@ -819,6 +849,7 @@ async function refreshPartyState() {
     state.activeInstance = payload.activeInstance;
     renderPartySummary();
     renderInstanceSummary();
+    updatePartyControls();
   } catch (error) {
     setStatus("Unable to load party state.");
   }
@@ -847,6 +878,7 @@ async function createParty() {
 
     state.party = payload.party;
     renderPartySummary();
+    updatePartyControls();
     setStatus(`Created party ${payload.party.name}.`);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "Unable to create party.");
@@ -876,6 +908,7 @@ async function joinParty() {
 
     state.party = payload.party;
     renderPartySummary();
+    updatePartyControls();
     setStatus(`Joined party ${payload.party.name}.`);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "Unable to join party.");
@@ -901,6 +934,7 @@ async function leaveParty() {
   const payload = await response.json();
   state.party = payload.party;
   renderPartySummary();
+  updatePartyControls();
   setStatus("Left the current party.");
 }
 
@@ -986,6 +1020,33 @@ function renderPartySummary() {
   }
 }
 
+function updatePartyControls() {
+  const selectedCharacter = getSelectedCharacter();
+  const isLeader = Boolean(
+    state.party &&
+    selectedCharacter &&
+    state.party.leaderCharacterId === selectedCharacter.id
+  );
+  const canLaunchParty = Boolean(state.party && isLeader && !state.activeInstance);
+
+  elements.createPartyButton.disabled = !selectedCharacter || Boolean(state.party);
+  elements.joinPartyButton.disabled = !selectedCharacter || Boolean(state.party);
+  elements.leavePartyButton.disabled = !selectedCharacter || !state.party;
+  elements.launchPartyButton.disabled = !canLaunchParty;
+
+  if (state.activeInstance?.mode === "party") {
+    elements.launchPartyButton.textContent = "Party Run Active";
+    return;
+  }
+
+  if (!state.party) {
+    elements.launchPartyButton.textContent = "Launch Party Run";
+    return;
+  }
+
+  elements.launchPartyButton.textContent = isLeader ? "Launch Party Run" : "Leader Launches Party Run";
+}
+
 function renderInstanceSummary() {
   elements.instanceSummary.innerHTML = "";
 
@@ -994,17 +1055,67 @@ function renderInstanceSummary() {
     return;
   }
 
-  const header = document.createElement("div");
-  header.className = "presence-item";
-  header.textContent = `Instance ${state.activeInstance.id} (${state.activeInstance.mode})`;
-  elements.instanceSummary.appendChild(header);
+  const runtime = state.activeInstance.runtime || {};
+  appendInstanceCard(`Instance ${state.activeInstance.id} (${state.activeInstance.mode}) floor ${runtime.floor || 1}`);
 
-  for (const member of state.activeInstance.members || []) {
-    const item = document.createElement("div");
-    item.className = "presence-item";
-    item.textContent = `${member.name} in ${member.mapId}`;
-    elements.instanceSummary.appendChild(item);
+  const encounter = runtime.encounter;
+  if (encounter?.turnOrder?.length) {
+    const activeTurn = encounter.turnOrder[encounter.activeTurnIndex] || null;
+    appendInstanceCard(`Round ${encounter.round}. Current turn: ${activeTurn?.name || "Unknown"}.`);
+    appendInstanceCard(`Initiative: ${encounter.turnOrder.map((entry) => `${entry.name} ${entry.initiative}`).join(" | ")}`);
   }
+
+  const activePlayer = getSelectedRuntimePlayer();
+  if (activePlayer) {
+    appendInstanceCard(`Status: HP ${activePlayer.hp}/${activePlayer.maxHp}, Mana ${activePlayer.mana ?? 0}/${activePlayer.maxMana ?? 0}${formatTimedEffects(activePlayer.timedEffects) ? `, ${formatTimedEffects(activePlayer.timedEffects)}` : ""}`);
+  }
+
+  const logLabel = document.createElement("div");
+  logLabel.className = "presence-item";
+  logLabel.textContent = "Combat Log";
+  elements.instanceSummary.appendChild(logLabel);
+
+  const logEntries = runtime.log || [];
+  if (logEntries.length === 0) {
+    appendInstanceCard("No dungeon events yet.", true);
+    return;
+  }
+
+  for (const line of logEntries) {
+    appendInstanceCard(line);
+  }
+
+  elements.instanceSummary.scrollTop = elements.instanceSummary.scrollHeight;
+}
+
+function updateDungeonActionState() {
+  const isMyTurn = isSelectedCharacterTurn();
+  const inInstance = Boolean(state.activeInstance?.runtime);
+  const actionButtons = [
+    elements.pickupItemButton,
+    elements.meleeAttackButton,
+    elements.rangedAttackButton,
+    elements.restButton,
+    elements.useUpStairsButton,
+    elements.useDownStairsButton
+  ];
+
+  for (const button of actionButtons) {
+    button.disabled = inInstance && !isMyTurn;
+  }
+
+  for (const button of document.querySelectorAll("[data-direction]")) {
+    button.disabled = inInstance && !isMyTurn;
+  }
+}
+
+function isSelectedCharacterTurn() {
+  const encounter = state.activeInstance?.runtime?.encounter;
+  if (!state.activeInstance?.runtime) return true;
+  if (!encounter?.turnOrder?.length) return true;
+
+  const currentTurn = encounter.turnOrder[encounter.activeTurnIndex] || null;
+  return currentTurn?.type === "player" && currentTurn.characterId === state.selectedCharacterId;
 }
 
 function sendChat() {
@@ -1116,6 +1227,13 @@ function appendChat(message) {
   elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
 }
 
+function appendInstanceCard(text, muted = false) {
+  const item = document.createElement("div");
+  item.className = `presence-item${muted ? " muted" : ""}`;
+  item.textContent = text;
+  elements.instanceSummary.appendChild(item);
+}
+
 function collectPurchasedStats() {
   const stats = {};
 
@@ -1131,6 +1249,14 @@ function collectPurchasedStats() {
 
 function getSelectedCharacter() {
   return state.characters.find((character) => character.id === state.selectedCharacterId) || null;
+}
+
+function getSelectedRuntimePlayer() {
+  return state.activeInstance?.runtime?.players?.[state.selectedCharacterId] || null;
+}
+
+function getSelectedAdventurer() {
+  return getSelectedRuntimePlayer() || getSelectedCharacter();
 }
 
 function upsertCharacter(character) {
@@ -1154,6 +1280,12 @@ function closeCharacterModal() {
 
 function openPartyModal() {
   elements.partyModal.dataset.open = "true";
+  updatePartyControls();
+  if (state.party) {
+    elements.joinPartyId.focus();
+    return;
+  }
+  elements.partyName.focus();
 }
 
 function closePartyModal() {
@@ -1162,6 +1294,104 @@ function closePartyModal() {
 
 function setStatus(value) {
   elements.connectionStatus.textContent = value;
+}
+
+function getActiveTurnCharacterId(runtime) {
+  const encounter = runtime?.encounter;
+  if (!encounter?.turnOrder?.length) return null;
+  const currentTurn = encounter.turnOrder[encounter.activeTurnIndex] || null;
+  return currentTurn?.type === "player" ? currentTurn.characterId : null;
+}
+
+function animateProjectileFromInstanceUpdate(previousRuntime, nextRuntime) {
+  if (!previousRuntime || !nextRuntime) return;
+
+  const previousLogLength = previousRuntime.log?.length || 0;
+  const newLogLines = (nextRuntime.log || []).slice(previousLogLength);
+  const rangedLog = [...newLogLines].reverse().find((line) => /^(.+?) shoots (.+?) for \d+/.test(line));
+  if (!rangedLog) return;
+
+  const match = rangedLog.match(/^(.+?) shoots (.+?) for \d+/);
+  if (!match) return;
+
+  const [, attackerName, targetName] = match;
+  const attacker = Object.values(previousRuntime.players || {}).find((player) => player.name === attackerName);
+  const target =
+    Object.values(previousRuntime.monsters || {}).find((monster) => monster.name === targetName) ||
+    Object.values(nextRuntime.monsters || {}).find((monster) => monster.name === targetName);
+
+  if (!attacker || !target) return;
+  animateProjectile(attacker, target);
+}
+
+function formatTimedEffects(timedEffects) {
+  const entries = Object.values(timedEffects || {});
+  if (entries.length === 0) return "";
+  return entries
+    .map((effect) => {
+      const bonusParts = [];
+      if (effect.toHitBonus) bonusParts.push(`+${effect.toHitBonus} hit`);
+      if (effect.armorClassBonus) bonusParts.push(`+${effect.armorClassBonus} AC`);
+      if (effect.resistPoison) bonusParts.push("resist poison");
+      if (effect.sensesInvisible) bonusParts.push("see invisible");
+      return `${effect.label || "Effect"} ${effect.remainingTurns ?? 0}t${bonusParts.length ? ` (${bonusParts.join(", ")})` : ""}`;
+    })
+    .join(" | ");
+}
+
+function animateProjectile(from, to) {
+  if (!elements.projectileLayer || !state.activeInstance?.runtime) return;
+
+  clearProjectiles();
+
+  const runtime = state.activeInstance.runtime;
+  const sourceX = ((from.x + 0.5) / runtime.width) * 100;
+  const sourceY = ((from.y + 0.5) / runtime.height) * 100;
+  const targetX = ((to.x + 0.5) / runtime.width) * 100;
+  const targetY = ((to.y + 0.5) / runtime.height) * 100;
+
+  const projectile = document.createElement("div");
+  projectile.className = "projectile";
+  projectile.textContent = "-";
+  projectile.style.left = `${sourceX}%`;
+  projectile.style.top = `${sourceY}%`;
+  elements.projectileLayer.appendChild(projectile);
+
+  projectile.animate(
+    [
+      { left: `${sourceX}%`, top: `${sourceY}%`, opacity: 0 },
+      { left: `${sourceX}%`, top: `${sourceY}%`, opacity: 1, offset: 0.1 },
+      { left: `${targetX}%`, top: `${targetY}%`, opacity: 1, offset: 0.88 },
+      { left: `${targetX}%`, top: `${targetY}%`, opacity: 0 }
+    ],
+    {
+      duration: 950,
+      easing: "linear",
+      fill: "forwards"
+    }
+  );
+
+  window.setTimeout(() => {
+    projectile.remove();
+  }, 1100);
+}
+
+function clearProjectiles() {
+  if (!elements.projectileLayer) return;
+  elements.projectileLayer.innerHTML = "";
+}
+
+function centerViewportOn(entity, width, height) {
+  if (!elements.mapViewport || !entity) return;
+
+  const viewport = elements.mapViewport;
+  const cellWidth = elements.grid.scrollWidth / Math.max(1, width);
+  const cellHeight = elements.grid.scrollHeight / Math.max(1, height);
+  const targetLeft = (entity.x * cellWidth) - (viewport.clientWidth / 2) + (cellWidth / 2);
+  const targetTop = (entity.y * cellHeight) - (viewport.clientHeight / 2) + (cellHeight / 2);
+
+  viewport.scrollLeft = Math.max(0, targetLeft);
+  viewport.scrollTop = Math.max(0, targetTop);
 }
 
 function escapeHtml(value) {
